@@ -13,20 +13,27 @@
 #define DPRINTF(...)
 #endif
 
+#define NUMBER_OF_COLORS (5)
 typedef enum {
-  BLUE,
-  GREEN,
   RED,
   YELLOW,
-  MAGENTA,
+  GREEN,
+  BLUE,
   EMPTY,
-  POPPED
+  BULLET,
 } Bubblecolor;
 
-#define NUMBER_OF_COLORS (5)
+typedef enum {
+  RIGHT,
+  LEFT,
+  UP,
+  DOWN,
+  NONE,
+} Popdirection;
 
-const int board_width = 20;
-const int board_height = 20;
+
+const int board_width = 5;
+const int board_height = 5;
 Bubblecolor **board = NULL;
 
 GtkWidget *window;
@@ -59,12 +66,15 @@ draw_callback (GtkWidget *widget, cairo_t *cr, gpointer data)
         case GREEN:
           cairo_set_source_rgb (cr, 0, 1, 0);
           break;
+
+        case BULLET:
+          cairo_set_source_rgb (cr, 0, 0, 0);
+          break;
+
         case RED:
           cairo_set_source_rgb (cr, 1, 0, 0);
           break;
-        case MAGENTA:
-          cairo_set_source_rgb (cr, 1, 0, 1);
-          break;
+
         case YELLOW:
           cairo_set_source_rgb (cr, 1, 1, 0);
           break;
@@ -76,9 +86,11 @@ draw_callback (GtkWidget *widget, cairo_t *cr, gpointer data)
 
       cairo_translate (cr, bubble_center_x, bubble_center_y);
       cairo_scale (cr, 1, height/(double)width);
-      cairo_arc (cr, 0, 0,
-          bubble_width/2.5,
-          0, 2 * G_PI);
+
+      if (board[i][j] == BULLET)
+        cairo_arc (cr, 0, 0, bubble_width/5.0, 0, 2 * G_PI);
+      else
+        cairo_arc (cr, 0, 0, bubble_width/2.5, 0, 2 * G_PI);
 
       cairo_fill (cr);
 
@@ -89,6 +101,17 @@ draw_nothing:
   }
 
   return FALSE;
+}
+
+gboolean POP_THREAD_RUNNING = FALSE;
+void *pop_thread(void *posData)
+{
+  POP_THREAD_RUNNING = TRUE;
+  DPRINTF("Entering POP thread");
+  pop (((int*)posData)[0], ((int*)posData)[1], NONE);
+  g_free(posData);
+  POP_THREAD_RUNNING = FALSE;
+  DPRINTF("Exiting POP thread");
 }
 
 gboolean
@@ -106,11 +129,12 @@ mouse_callback (GtkWidget *widget, GdkEventButton* event, gpointer data)
   int x = (int) mouse_x / bubble_width;
   int y = (int) mouse_y / bubble_height;
 
-  pop(x,y, TRUE);
+  GError* err = NULL;
+  void* posData = malloc(sizeof(int)*2);
+  ((int*)posData)[0] = x;
+  ((int*)posData)[1] = y;
 
-  pack_board();
-
-  gtk_widget_queue_draw(window);
+  g_thread_create (pop_thread, posData, FALSE, &err);
 
   return TRUE;
 }
@@ -133,100 +157,65 @@ void bubble_init()
   fill_with_random();
 }
 
-gint pop(int x, int y, gboolean check_lonely)
+gboolean refresh_thread(void* pData) {
+  //DPRINTF("Redrawing");
+    gtk_widget_queue_draw(window);
+  return TRUE;
+}
+
+gint pop(int x, int y, Popdirection direction)
 {
-  if (board[x][y] == EMPTY)
+  int popped = 0;
+
+  if ( x<0 || y<0 || y>(board_width-1) || x>(board_width-1) )
     return 0;
 
   Bubblecolor val = board[x][y];
 
-  gboolean left_is_equal = ( x>0 && val==board[x-1][y] );
-  gboolean right_is_equal = ( x<(board_width-1) && val==board[x+1][y] );
-  gboolean down_is_equal = ( y<(board_height-1) && val==board[x][y+1] );
-  gboolean up_is_equal = ( y>0 && val==board[x][y-1] );
+  if (val == EMPTY) {
+    board[x][y] = BULLET;
+    usleep(1e5);
+    board[x][y] = EMPTY;
 
-  /* lonely bubble */
-  if ( check_lonely && ! (left_is_equal||right_is_equal||down_is_equal||up_is_equal) )
-    return 0;
-
-  DPRINTF("Popping %d %d", x, y);
-
-  int popped = 0;
-  /* temporary status to avoid back recursion */
-  board[x][y] = POPPED;
-
-  if (left_is_equal)
-    popped += pop(x-1, y, FALSE);
-  if (right_is_equal)
-    popped += pop(x+1, y, FALSE);
-  if (down_is_equal)
-    popped += pop(x, y+1, FALSE);
-  if (up_is_equal)
-    popped += pop(x, y-1, FALSE);
-
-  board[x][y] = EMPTY;
-  return popped+1;
-}
-
-gint pack_rows(int y)
-{
-  gint floated = 0;
-  for (int r=0; r<board_height; r++)
-  {
-    if (y>0 && board[r][y]==EMPTY && board[r][y-1]!=EMPTY)
-      floated += float_empty_to_top(r, y);
-  }
-
-  return floated;
-}
-
-gint pack_columns()
-{
-  for (int x=0; x<board_width; x++) {
-    if (is_empty_column(x))
-      float_empty_col_to_left(x);
-  }
-}
-
-gboolean is_empty_column(gint x)
-{
-  for (int y=0; y<board_height; y++) {
-    if (board[x][y]!=EMPTY)
-      return FALSE;
-  }
-
-  return TRUE;
-}
-
-gint float_empty_col_to_left(gint x)
-{
-  if (x>0 && is_empty_column(x)) {
-    for (int y=0; y<board_height; y++) {
-      board[x][y] = board[x-1][y];
-      board[x-1][y] = EMPTY;
+    switch (direction) {
+      case LEFT:
+        popped += pop (x-1, y, direction);
+        break;
+      case RIGHT:
+        popped += pop (x+1, y, direction);
+        break;
+      case UP:
+        popped += pop (x, y-1, direction);
+        break;
+      case DOWN:
+        popped += pop (x, y+1, direction);
+        break;
+      default:
+        break;
+      /* user attempted to pop an empty square */
     }
-    float_empty_col_to_left(x-1);
-  }
-}
-
-gint float_empty_to_top(gint x, gint y)
-{
-  if (y>0 && board[x][y-1]!=EMPTY) {
-    board[x][y] = board[x][y-1];
-    board[x][y-1] = EMPTY;
-    DPRINTF("Swapped %d,%d with %d,%d", x, y, x, y-1);
-    return 1 + float_empty_to_top(x, y-1);
+    return popped;
   }
 
-  return 0;
-}
+  switch (val) {
+    case RED:
+      DPRINTF("Popping %d %d", x, y);
+      popped++;
+      board[x][y] = EMPTY;
+      popped += pop (x-1, y, LEFT);
+      popped += pop (x+1, y, RIGHT);
+      popped += pop (x, y-1, UP);
+      popped += pop (x, y+1, DOWN);
+      break;
+    case YELLOW:
+    case GREEN:
+    case BLUE:
+      if (direction !=NONE)
+        board[x][y]--;
+      break;
+  }
 
-gint pack_board()
-{
-  gint floated = 0;
-  for (int c=1; c<board_width; c++)
-    floated += pack_rows(c);
-  pack_columns();
+  return popped;
 }
 
 gboolean input_callback (GIOChannel *iochannel, GIOCondition condition, gpointer data) { 
@@ -260,9 +249,7 @@ gboolean input_callback (GIOChannel *iochannel, GIOCondition condition, gpointer
     goto input_fail;
   }
 
-  pop(x,y, TRUE);
-
-  pack_board();
+  pop(x, y, NONE);
 
   print_board();
 
@@ -290,9 +277,6 @@ void print_board()
         case RED:
           putchar('R');
           break;
-        case MAGENTA:
-          putchar('M');
-          break;
         case GREEN:
           putchar('G');
           break;
@@ -304,10 +288,17 @@ void print_board()
     }
     putchar('\n');
   }
+  return;
 }
+
+gboolean REFRESH_THREAD_ON = TRUE;
 
 int main (int argc, char *argv[])
 {
+
+  gdk_threads_init ();
+  gdk_threads_enter ();
+
   gtk_init(&argc, &argv);
   bubble_init();
 
@@ -332,14 +323,20 @@ int main (int argc, char *argv[])
   gtk_widget_show(drawing_area);
 
   GIOChannel* stdin_channel = g_io_channel_unix_new(fileno(stdin));
-  GError *error = NULL;
+
+
+    gdk_threads_add_timeout(100, refresh_thread, NULL);
 
   g_io_add_watch(stdin_channel, (G_IO_IN | G_IO_HUP | G_IO_ERR | G_IO_PRI), input_callback, NULL);
 
+  GError *error = NULL;
+
 
   gtk_main();
+  gdk_threads_leave ();
 
   g_free(board);
+  REFRESH_THREAD_ON = FALSE;
 
   return 0;
 }
